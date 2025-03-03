@@ -1,0 +1,11 @@
+python main_sample_birds.py \
+ --config cifar10.yml \
+ --exp checkpoints \
+ --doc  cifar10\
+ --ni \
+ --sample \
+ --fid \
+ --use_ema   \
+ --skip_type quad \
+ --timesteps 100 \
+ --image_folder cifar10_4_models_30_60_80_80_200_200_200_200

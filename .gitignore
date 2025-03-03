@@ -1,0 +1,16 @@
+*.jpg
+*.png
+*.txt
+*.pth
+*.log
+*.tsv
+*.pickle
+*.pyc
+*.safetensors
+*.onnx
+*.parquet
+*.npy
+
+checkpoints/
+run/
+data/
