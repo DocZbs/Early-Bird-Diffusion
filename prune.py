@@ -14,7 +14,6 @@ from torchvision import transforms
 import torchvision
 from datasets import get_dataset, data_transform, inverse_data_transform
 import torchvision.utils as tvu
-# from utils import UnlabeledImageFolder
 import json
 torch.set_printoptions(sci_mode=False)
 
@@ -23,8 +22,9 @@ def parse_args_and_config():
     parser = argparse.ArgumentParser(description=globals()["__doc__"])
 
     parser.add_argument(
-        "--config", type=str, required=True, help="Path to the config file"
+        "--config", type=str, required=True, help="Path to the config file."
     )
+
     parser.add_argument("--seed", type=int, default=2333, help="Random seed")
     parser.add_argument("--taylor_batch_size", type=int, default=128, help="batch size for taylor expansion")
     parser.add_argument(
@@ -38,7 +38,7 @@ def parse_args_and_config():
         "Will be the name of the log folder.",
     )
     parser.add_argument(
-        "--comment", type=str, default="", help="A string for experiment comment"
+        "--comment", type=str, default="", help="A string for experiment comment."
     )
 
     parser.add_argument(
@@ -285,8 +285,8 @@ def main():
         # print(mask)
         # print(len(mask))
         # item={"model": args.restore_from, "mask": mask}
-        mask_save_dir =os.path.join(masks_dir, args.save_pruned_model.split('/')[-1].replace('.pth', ""))
-        # save_pruned_model
+        mask_save_dir = os.path.join(masks_dir, args.save_pruned_model.split('/')[-1].replace('.pth', ""))
+        # save the mask for the pruned model
         np.save(mask_save_dir, np.array(mask))
         if args.pruner == 'reinit':
             def reset_parameters(model):

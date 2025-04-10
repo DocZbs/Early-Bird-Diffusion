@@ -1,3 +1,4 @@
+# Extract the images for CIFAR10.
 import os
 import torchvision
 from torchvision.datasets import CIFAR10

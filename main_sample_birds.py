@@ -1,3 +1,6 @@
+# Sample from multiple pruned networks for the TA-EB evaluations.
+# Default is three networks to sample from.
+
 import argparse
 import traceback
 import shutil
@@ -24,8 +27,6 @@ def save_checkpoint(state, is_best, epoch, filepath):
     else:
         filename = os.path.join(filepath, 'ckpt'+str(epoch)+'.pth.tar')
         torch.save(state, filename)
-        # filename = os.path.join(filepath, 'ckpt.pth.tar')
-        # torch.save(state, filename)
         if is_best:
             shutil.copyfile(filename, os.path.join(filepath, 'model_best.pth.tar'))
             

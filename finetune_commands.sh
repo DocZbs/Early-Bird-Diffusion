@@ -1,4 +1,3 @@
-
 # Example command:
 # python main.py \
 #  --config cifar10.yml \
@@ -10,8 +9,3 @@
 #  --skip_type quad  \
 #  --use_ema \
 #  --load_pruned_model [your pruned model path]
-
-
-
-
-
