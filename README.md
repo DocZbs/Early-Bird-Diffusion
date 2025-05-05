@@ -1,5 +1,6 @@
 # Early-Bird Diffusion: Investigating and Leveraging Timestep-Aware Early-Bird Tickets in Diffusion Models for Efficient Training
-Lexington Whalen, Zhenbang Du, Haoran You, Chaojian Li, Sixu Li, and Yingyan (Celine) Lin.
+Lexington Whalen*, Zhenbang Du*, Haoran You*, Chaojian Li, Sixu Li, and Yingyan (Celine) Lin.
+*Equal Contribution
 
 Accepted by [**CVPR 2025**](https://cvpr.thecvf.com/).
 
@@ -53,4 +54,12 @@ This codebase is inspired by NeurIPS 2023's [Structural Pruning for Diffusion Mo
 
 If you find this work useful for your research, please cite:
 
-[Todo: include official citation from CVPR]
+
+````
+@inproceedings{whalen2025earlybird,
+  title={Early-Bird Diffusion: Investigating and Leveraging Timestep-Aware Early-Bird Tickets in Diffusion Models for Efficient Training},
+  author={Lexington Whalen, Zhenbang Du, Haoran You, Chaojian Li, Sixu Li, and Yingyan (Celine) Lin.},
+  booktitle={The IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR 2025)},
+  year={2025}
+}
+````
