@@ -1,12 +1,4 @@
 #!/bin/bash
-#SBATCH -JEarlyBird                               # Job name
-#SBATCH -Agts-ylin715                             # Charge account
-#SBATCH -N1 --gres=gpu:A100:1                     # Number of nodes and 4 A100 GPUs required
-#SBATCH -t20:0:0                                  # Duration of the job (20 hours)
-#SBATCH -qinferno                                 # QOS name
-#SBATCH -oReport-%j.out                           # Combined output and error messages file
-#SBATCH --mail-type=BEGIN,END,FAIL                # Mail preferences
-#SBATCH --mail-user=lwhalen7@gatech.edu           # e-mail address for notifications
 
 # Change to your working directory
 cd /storage/scratch1/1/lwhalen7/deb

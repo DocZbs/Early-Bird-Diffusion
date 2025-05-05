@@ -6,7 +6,8 @@ def compute_alpha(beta, t):
     a = (1 - beta).cumprod(dim=0).index_select(0, t + 1).view(-1, 1, 1, 1)
     return a
 
-def generalized_steps_models(x,seq,models,b,**kwargs):
+def generalized_steps_models(x,seq,models,b, 
+                             **kwargs):
     # use multiple models
     with torch.no_grad():
         n = x.size(0)
@@ -21,6 +22,8 @@ def generalized_steps_models(x,seq,models,b,**kwargs):
             xt = xs[-1].to('cuda')
             
             # when timesteps are high more noise
+            # here you can change the timestep regions
+            # depending on the number of models you select
             # use smallest model during more noise 
             if 0 <= i < 240: 
                 mask_index = 0 # biggest model
