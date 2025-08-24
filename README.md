@@ -5,6 +5,11 @@ Lexington Whalen*, Zhenbang Du*, Haoran You*, Chaojian Li, Sixu Li, and Yingyan 
 Accepted by [**CVPR 2025**](https://cvpr.thecvf.com/).
 
 ## Overview
+
+<p align="center">
+<img width="928" alt="image" src="figure/figure.png"> 
+</p>
+
 ### Motivation and Insight:
 Training diffusion models (DMs) is computationally expensive due to multiple forward and backward passes across numerous timesteps. We investigate the existence of "Early-Bird (EB) tickets" - sparse subnetworks that emerge early in training yet maintain high generation quality - and develop a new approach called EB-Diff-Train to leverage these tickets for efficient training.
 
