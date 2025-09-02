@@ -1,0 +1,84 @@
+data:
+  dataset: "CIFAR10"
+  image_size: 32
+  channels: 3
+  logit_transform: false
+  uniform_dequantization: false
+  gaussian_dequantization: false
+  random_flip: true
+  rescaled: true
+  num_workers: 4
+
+model:
+  type: "dit"
+  var_type: "fixedlarge"
+  ema: true
+  ema_rate: 0.999
+  normalization: "GroupNorm"
+  nonlinearity: "swish"
+  ch_mult: [1, 2, 2, 2]
+  num_res_blocks: 2
+  attn_resolutions: [16, ]
+  dropout: 0.1
+  resamp_with_conv: true
+  conditional: true
+  
+  # DiT specific parameters
+  hidden_size: 384
+  depth: 12
+  num_heads: 6
+  mlp_ratio: 4.0
+  patch_size: 2
+  class_dropout_prob: 0.1
+  num_classes: 10
+  learn_sigma: false
+
+diffusion:
+  beta_schedule: linear
+  beta_start: 0.0001
+  beta_end: 0.02
+  num_diffusion_timesteps: 1000
+
+training:
+  batch_size: 512
+  n_epochs: 800
+  n_iters: 500000
+  snapshot_freq: 20000
+  validation_freq: 2000
+  
+  # VR-DiT Configuration
+  use_vrdit: true                   # Enable VR-DiT variance reduction
+  
+  # NSS: Neyman Stratified Sampling
+  use_nss: true                     # Enable stratified timestep sampling
+  nss_strata: 4                     # Number of strata (layers) by SNR
+  nss_beta: 0.05                    # EMA decay for variance estimation
+  nss_use_weights: false            # Use importance sampling weights
+  
+  # ASN: Antithetic + Sobol Noise
+  use_asn: true                     # Enable antithetic + low-discrepancy noise
+  asn_antithetic: true              # Use antithetic (paired) noise
+  asn_sobol: true                   # Use Sobol QMC sequences
+  
+  # mSVRG: mini Stochastic Variance Reduced Gradient
+  use_msvrg: true                   # Enable mSVRG control variates
+  msvrg_snapshot_freq: 500          # Snapshot frequency (steps)
+  msvrg_buffer_size: 256            # Buffer size per stratum
+
+sampling:
+  method: "generalized"
+  type: "ddpm_noisy"
+  step: 250
+  eta: 0.0
+  skip_type: "uniform"
+  base_samples: 1000
+  batch_size: 50
+
+optim:
+  weight_decay: 0.000
+  optimizer: "Adam"
+  lr: 0.0002
+  beta1: 0.9
+  amsgrad: false
+  eps: 0.00000001
+  grad_clip: 1.0

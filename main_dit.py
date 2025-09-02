@@ -9,7 +9,7 @@ import torch
 import numpy as np
 import torch.utils.tensorboard as tb
 import torch.nn as nn
-from runner.diffusion_ddptraining import Diffusion
+from runner.diffusion_dit_training import DITDiffusion
 import torch.distributed as dist
 
 torch.set_printoptions(sci_mode=False)
@@ -24,8 +24,6 @@ def save_checkpoint(state, is_best, epoch, filepath):
     else:
         filename = os.path.join(filepath, 'ckpt'+str(epoch)+'.pth.tar')
         torch.save(state, filename)
-        # filename = os.path.join(filepath, 'ckpt.pth.tar')
-        # torch.save(state, filename)
         if is_best:
             shutil.copyfile(filename, os.path.join(filepath, 'model_best.pth.tar'))
             
@@ -139,7 +137,6 @@ def parse_args_and_config():
     args = parser.parse_args()
     args.log_path = os.path.join(args.exp, "logs", args.doc)
 
-    # parse config file
     with open(os.path.join("configs", args.config), "r") as f:
         config = yaml.safe_load(f)
     new_config = dict2namespace(config)
@@ -149,26 +146,20 @@ def parse_args_and_config():
     
     if not args.test and not args.sample:
         if not args.resume_training:
-            # 只在主进程(rank==0)中创建目录
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-                # 直接创建目录（如果存在就忽略，不存在就创建）
                 os.makedirs(args.log_path, exist_ok=True)
                 os.makedirs(tb_path, exist_ok=True)
                 
-                # 保存配置文件
                 with open(os.path.join(args.log_path, "config.yml"), "w") as f:
                     yaml.dump(new_config, f, default_flow_style=False)
             
-            # 等待主进程完成
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
             
-            # 所有进程确保目录存在
             os.makedirs(args.log_path, exist_ok=True)
             os.makedirs(tb_path, exist_ok=True)
 
             new_config.tb_logger = tb.SummaryWriter(log_dir=tb_path)
-            # setup logger
             level = getattr(logging, args.verbose.upper(), None)
             if not isinstance(level, int):
                 raise ValueError("level {} not supported".format(level))
@@ -225,12 +216,10 @@ def parse_args_and_config():
                             print("Output image folder exists. Program halted.")
                             sys.exit(0)
 
-    # add device
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     logging.info("Using device: {}".format(device))
     new_config.device = device
 
-    # set random seed
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     if torch.cuda.is_available():
@@ -261,7 +250,7 @@ def main():
     logging.info("Exp comment = {}".format(args.comment))
 
     try:
-        runner = Diffusion(args, config)
+        runner = DITDiffusion(args, config)
         if args.sample:
             runner.sample()
         elif args.test:
@@ -271,7 +260,8 @@ def main():
     except Exception:
         logging.error(traceback.format_exc())
     finally:
-        dist.destroy_process_group()
+        if torch.distributed.is_initialized():
+            dist.destroy_process_group()
 
     return 0
 

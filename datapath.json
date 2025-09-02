@@ -1,0 +1,9 @@
+{
+    "imagenet": {
+        "train": "/mnt/nvme-fast/datasets/imagenet-2010"
+    },
+    "cifar10": {
+        "train": "/mnt/nvme-fast/datasets/cifar-10-batches-py",
+        "val": "/mnt/nvme-fast/datasets/cifar-10-batches-py"
+    }
+}

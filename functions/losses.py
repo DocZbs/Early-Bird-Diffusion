@@ -10,10 +10,11 @@ def noise_estimation_loss(model,
     a = (1-b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
     x = x0 * a.sqrt() + e * (1.0 - a).sqrt()
     output = model(x, t.float())
-    if keepdim:
-        return (e - output).square().sum(dim=(1, 2, 3))
+    loss_per_sample = (e - output).square().sum(dim=(1, 2, 3))
+    if keepdim is True:
+        return loss_per_sample
     else:
-        return (e - output).square().sum(dim=(1, 2, 3)).mean(dim=0)
+        return loss_per_sample.mean(dim=0)
 
 def noise_estimation_kd_loss(model,
                              teacher,
@@ -32,8 +33,26 @@ def noise_estimation_kd_loss(model,
         return 0.7*(teacher_output - output).square().sum(dim=(1, 2, 3)).mean(dim=0) + 0.3 * (e - output).square().sum(dim=(1, 2, 3)).mean(dim=0)
 
 
+def noise_estimation_loss_dit(model,
+                          x0: torch.Tensor,
+                          t: torch.LongTensor,
+                          e: torch.Tensor,
+                          b: torch.Tensor,
+                          y: torch.Tensor = None,
+                          keepdim=False):
+    a = (1-b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
+    x = x0 * a.sqrt() + e * (1.0 - a).sqrt()
+    output = model(x, t.float(), y)
+    loss_per_sample = (e - output).square().sum(dim=(1, 2, 3))
+    if keepdim is True:
+        return loss_per_sample
+    else:
+        return loss_per_sample.mean(dim=0)
+
+
 loss_registry = {
     'simple': noise_estimation_loss,
+    'dit': noise_estimation_loss_dit,
 }
 
 

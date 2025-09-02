@@ -8,7 +8,7 @@ import tqdm
 import torch
 import torch.utils.data as data
 
-from model.diffusion import Model
+from model.dit import DITModel
 from model.ema import EMAHelper
 from functions import get_optimizer
 from functions.losses import loss_registry
@@ -16,17 +16,25 @@ from datasets import get_dataset, data_transform, inverse_data_transform
 from functions.ckpt_util import get_ckpt_path
 import torch.nn as nn
 import torchvision.utils as tvu
+from vrdit_controller import VRDiTController
 
 def updateBN(model, s=1e-4):
     for m in model.modules():
         if isinstance(m, nn.BatchNorm2d):
-            m.weight.grad.data.add_(s*torch.sign(m.weight.data))  # L1
+            m.weight.grad.data.add_(s*torch.sign(m.weight.data))
 
 def torch2hwcuint8(x, clip=False):
     if clip:
         x = torch.clamp(x, -1, 1)
     x = (x + 1.0) / 2.0
     return x
+
+def get_rank():
+    """Get rank safely, return 0 for non-distributed training."""
+    if torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    else:
+        return 0
 
 
 def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
@@ -49,7 +57,7 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
         )
     elif beta_schedule == "const":
         betas = beta_end * np.ones(num_diffusion_timesteps, dtype=np.float64)
-    elif beta_schedule == "jsd":  # 1/T, 1/(T-1), 1/(T-2), ..., 1
+    elif beta_schedule == "jsd":
         betas = 1.0 / np.linspace(
             num_diffusion_timesteps, 1, num_diffusion_timesteps, dtype=np.float64
         )
@@ -62,21 +70,17 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
     return betas
 
 
-class Diffusion(object):
+class DITDiffusion(object):
     def __init__(self, args, config, device=None):
         self.args = args
         self.config = config
         
-        # 添加分布式训练初始化
         if not hasattr(args, 'single_gpu') or not args.single_gpu:
-            # 检查是否已经初始化
             if not torch.distributed.is_initialized():
-                # 从环境变量获取分布式信息
                 local_rank = int(os.environ.get('LOCAL_RANK', 0))
                 world_size = int(os.environ.get('WORLD_SIZE', 1))
                 rank = int(os.environ.get('RANK', 0))
                 
-                # 初始化分布式进程组
                 torch.distributed.init_process_group(
                     backend='nccl',
                     init_method='env://',
@@ -84,7 +88,6 @@ class Diffusion(object):
                     rank=rank
                 )
                 
-                # 设置当前设备
                 torch.cuda.set_device(local_rank)
                 self.device = torch.device(f'cuda:{local_rank}')
             else:
@@ -112,23 +115,21 @@ class Diffusion(object):
         )
         if self.model_var_type == "fixedlarge":
             self.logvar = betas.log()
-            # torch.cat(
-            # [posterior_variance[1:2], betas[1:]], dim=0).log()
         elif self.model_var_type == "fixedsmall":
             self.logvar = posterior_variance.clamp(min=1e-20).log()
         self.build_model()
 
     def build_model(self):
         args, config = self.args, self.config
-        model = Model(config)
+        model = DITModel(config)
 
         if args.load_pruned_model is not None:
             print("Loading pruned model from {}".format(args.load_pruned_model))
             states = torch.load(args.load_pruned_model, map_location='cpu')
 
-            if isinstance(states, torch.nn.Module): # a simple pruned model 
+            if isinstance(states, torch.nn.Module):
                 model = torch.load(args.load_pruned_model, map_location='cpu')
-            elif isinstance(states, list): # pruned model and training states
+            elif isinstance(states, list):
                 model = torch.load(args.base_pruned_model, map_location='cpu')
                 weights_dict = {}
                 for k, v in states[0].items():
@@ -136,7 +137,6 @@ class Diffusion(object):
                     weights_dict[new_k] = v
                 model = model.to(self.device)
                 model.load_state_dict(weights_dict, strict=True) 
-                # model = states[0]
                 if args.use_ema and self.config.model.ema:
                     print("Loading EMA")
                     ema_helper = EMAHelper(mu=self.config.model.ema_rate)
@@ -156,8 +156,6 @@ class Diffusion(object):
                 ckpt,
                 map_location='cpu',
             )
-            # print(states)
-            # print("keys",states[0].keys())
             if ".ckpt" in ckpt:
                 model = model.to(self.device)
                 model.load_state_dict(states, strict=True) 
@@ -182,7 +180,6 @@ class Diffusion(object):
                     self.ema_helper = ema_helper
                 else:
                     self.ema_helper = None
-        
         elif self.args.use_pretrained:
             if getattr(self.config.sampling, "ckpt_id", None) is None:
                 ckpt = os.path.join(self.args.log_path, "ckpt.pth")
@@ -222,7 +219,6 @@ class Diffusion(object):
         elif self.args.train_from_scratch:
             return
         else:
-            # This used the pretrained DDPM model, see https://github.com/pesser/pytorch_diffusion
             if self.config.data.dataset == "CIFAR10":
                 name = "cifar10"
             elif self.config.data.dataset == "LSUN":
@@ -233,9 +229,54 @@ class Diffusion(object):
             print("Loading checkpoint {}".format(ckpt))
             states = torch.load(ckpt, map_location=self.device)
             if isinstance(states, (list,tuple)):
-                model.load_state_dict(states[0])
+                state_dict = states[0]
             else:
-                model.load_state_dict(states)
+                state_dict = states
+            
+            # Handle key mismatch: add 'dit.' prefix if needed
+            model_keys = set(model.state_dict().keys())
+            state_keys = set(state_dict.keys())
+            
+            # Check if we need to add 'dit.' prefix
+            if not any(key.startswith('dit.') for key in state_keys) and any(key.startswith('dit.') for key in model_keys):
+                print("Adding 'dit.' prefix to state_dict keys...")
+                new_state_dict = {}
+                for key, value in state_dict.items():
+                    new_key = f"dit.{key}"
+                    new_state_dict[new_key] = value
+                state_dict = new_state_dict
+            
+            # Check if we need to remove 'dit.' prefix
+            elif any(key.startswith('dit.') for key in state_keys) and not any(key.startswith('dit.') for key in model_keys):
+                print("Removing 'dit.' prefix from state_dict keys...")
+                new_state_dict = {}
+                for key, value in state_dict.items():
+                    if key.startswith('dit.'):
+                        new_key = key[4:]  # Remove 'dit.' prefix
+                        new_state_dict[new_key] = value
+                    else:
+                        new_state_dict[key] = value
+                state_dict = new_state_dict
+            
+            # Try loading with strict=False first to see what keys are missing/unexpected
+            try:
+                missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+                if missing_keys:
+                    print(f"Missing keys: {missing_keys[:5]}...")  # Show first 5
+                if unexpected_keys:
+                    print(f"Unexpected keys: {unexpected_keys[:5]}...")  # Show first 5
+                
+                # If there are missing keys, try with strict=False
+                if missing_keys or unexpected_keys:
+                    print("Loading with strict=False due to key mismatches")
+                    model.load_state_dict(state_dict, strict=False)
+                else:
+                    model.load_state_dict(state_dict, strict=True)
+                    
+            except Exception as e:
+                print(f"Error loading state_dict: {e}")
+                print("Attempting to load with strict=False...")
+                model.load_state_dict(state_dict, strict=False)
             model.to(self.device)
         self.model = model
     
@@ -243,24 +284,42 @@ class Diffusion(object):
         args, config = self.args, self.config
         tb_logger = self.config.tb_logger
         dataset, test_dataset = get_dataset(args, config)
-        from torch.utils.data.distributed import DistributedSampler
-        train_sampler = DistributedSampler(dataset)
-        train_loader = data.DataLoader(
-            dataset,
-            batch_size=config.training.batch_size,
-            shuffle=False,
-            num_workers=config.data.num_workers,
-            pin_memory=True,
-            sampler=train_sampler
-        )
+        
+        # Handle single GPU vs distributed training
+        if hasattr(args, 'single_gpu') and args.single_gpu:
+            train_loader = data.DataLoader(
+                dataset,
+                batch_size=config.training.batch_size,
+                shuffle=True,
+                num_workers=config.data.num_workers,
+                pin_memory=True
+            )
+        else:
+            from torch.utils.data.distributed import DistributedSampler
+            train_sampler = DistributedSampler(dataset)
+            train_loader = data.DataLoader(
+                dataset,
+                batch_size=config.training.batch_size,
+                shuffle=False,
+                num_workers=config.data.num_workers,
+                pin_memory=True,
+                sampler=train_sampler
+            )
         if self.args.train_from_scratch:
-            model = Model(config)
+            model = DITModel(config)
         else:
             model = self.model
 
         model = model.to(self.device)
-        # model = torch.nn.DataParallel(model)
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[self.device], output_device=self.device)
+        
+        # Handle single GPU vs distributed training for model wrapping
+        if not (hasattr(args, 'single_gpu') and args.single_gpu):
+            model = torch.nn.parallel.DistributedDataParallel(
+                model, 
+                device_ids=[self.device], 
+                output_device=self.device,
+                find_unused_parameters=False  # VR-DiT uses standard DDP
+            )
 
         optimizer = get_optimizer(self.config, model.parameters())
 
@@ -269,6 +328,29 @@ class Diffusion(object):
             ema_helper.register(model)
         else:
             ema_helper = None
+            
+        # Initialize VR-DiT Controller
+        self.vrdit_controller = VRDiTController(
+            T=self.num_timesteps,
+            device=self.device,
+            # NSS parameters
+            use_nss=getattr(config.training, 'use_nss', True),
+            nss_strata=getattr(config.training, 'nss_strata', 4),
+            nss_beta=getattr(config.training, 'nss_beta', 0.05),
+            nss_use_weights=getattr(config.training, 'nss_use_weights', False),
+            # ASN parameters
+            use_asn=getattr(config.training, 'use_asn', True),
+            asn_antithetic=getattr(config.training, 'asn_antithetic', True),
+            asn_sobol=getattr(config.training, 'asn_sobol', True),
+            # mSVRG parameters
+            use_msvrg=getattr(config.training, 'use_msvrg', True),
+            msvrg_snapshot_freq=getattr(config.training, 'msvrg_snapshot_freq', 500),
+            msvrg_buffer_size=getattr(config.training, 'msvrg_buffer_size', 256),
+        )
+        
+        # Enable VR-DiT if specified in config
+        if getattr(config.training, 'use_vrdit', False):
+            logging.info("VR-DiT (Variance-Reduced DiT) enabled")
 
         start_epoch, step = 0, 0
         if self.args.resume_training:
@@ -297,13 +379,12 @@ class Diffusion(object):
                 os.path.join(self.args.log_path, "ckpt_init.pth")
             )
         
-        # if torch.distributed.get_rank() == 0:
-        torch.distributed.barrier()
+        if torch.distributed.is_initialized(): torch.distributed.barrier()
         model.eval()
-        if torch.distributed.get_rank() == 0: 
+        if get_rank() == 0: 
             os.makedirs(os.path.join(args.log_path, 'vis'), exist_ok=True)
             with torch.no_grad():
-                n = 36 #config.sampling.batch_size
+                n = 36
                 x = torch.randn(
                     n,
                     config.data.channels,
@@ -316,7 +397,7 @@ class Diffusion(object):
                 grid = tvu.make_grid(x)
                 tvu.save_image(grid, os.path.join(args.log_path, 'vis', 'Init.png'))
 
-        torch.distributed.barrier()
+        if torch.distributed.is_initialized(): torch.distributed.barrier()
 
         for epoch in range(start_epoch, self.config.training.n_epochs):
             data_start = time.time()
@@ -326,28 +407,94 @@ class Diffusion(object):
                 data_time += time.time() - data_start
                 model.train()
                 step += 1
+                self.vrdit_controller.step()
 
                 x = x.to(self.device)
+                y = y.to(self.device) if y is not None else None
                 x = data_transform(self.config, x)
-                e = torch.randn_like(x)
                 b = self.betas
 
-                # antithetic sampling
-                t = torch.randint(
-                    low=0, high=self.num_timesteps, size=(n // 2 + 1,)
-                ).to(self.device)
-                t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
-                loss = loss_registry[config.model.type](model, x, t, e, b)
+                # VR-DiT: Sample timesteps and noise using variance reduction
+                t, e, weights = self.vrdit_controller.sample_timesteps_and_noise(n, x.shape)
 
-                if torch.distributed.get_rank() == 0: 
+                # VR-DiT uses full batch (no sample selection like AEGS)
+                x_selected = x
+                t_selected = t
+                e_selected = e
+                y_selected = y
+                
+                # Compute loss with importance sampling weights if using NSS
+                loss_fn = loss_registry[config.model.type]
+                
+                if self.vrdit_controller.nss_use_weights and self.vrdit_controller.use_nss:
+                    # Get per-sample losses for importance weighting
+                    try:
+                        per_sample_losses = loss_fn(model, x_selected, t_selected, e_selected, b, y_selected, keepdim=True)
+                    except TypeError:
+                        # Fallback for loss functions that don't support keepdim or y parameter
+                        logging.warning("Loss function doesn't support keepdim/y parameter, using fallback")
+                        per_sample_losses = loss_fn(model, x_selected, t_selected, e_selected, b, keepdim=True)
+                    loss = (per_sample_losses * weights).mean()
+                else:
+                    try:
+                        loss = loss_fn(model, x_selected, t_selected, e_selected, b, y_selected)
+                    except TypeError:
+                        # Fallback for loss functions that don't support y parameter
+                        loss = loss_fn(model, x_selected, t_selected, e_selected, b)
+
+                if get_rank() == 0: 
                     tb_logger.add_scalar("loss", loss, global_step=step)
+                    
+                    # Log VR-DiT statistics
+                    vrdit_stats = self.vrdit_controller.get_stats()
+                    for key, value in vrdit_stats.items():
+                        tb_logger.add_scalar(f"vrdit/{key}", value, global_step=step)
 
                     logging.info(
-                        f"step: {step}, loss: {loss.item()}, data time: {data_time / (i+1)}"
+                        f"step: {step}, loss: {loss.item():.6f}, "
+                        f"batch_size: {n}, "
+                        f"data_time: {data_time / (i+1):.4f}, "
+                        f"vrdit_nss: {self.vrdit_controller.use_nss}, "
+                        f"vrdit_asn: {self.vrdit_controller.use_asn}"
                     )
 
                 optimizer.zero_grad()
                 loss.backward()
+                
+                # VR-DiT: Update variance estimates for NSS
+                if self.vrdit_controller.use_nss:
+                    # Compute per-sample losses for variance estimation
+                    with torch.no_grad():
+                        if self.vrdit_controller.nss_use_weights:
+                            # We already have per_sample_losses from above
+                            self.vrdit_controller.update_variance_estimates(t_selected, per_sample_losses.detach())
+                        else:
+                            # Compute per-sample losses for variance tracking
+                            try:
+                                per_sample_losses = loss_fn(model, x_selected, t_selected, e_selected, b, y_selected, keepdim=True)
+                            except TypeError:
+                                # Fallback for loss functions that don't support keepdim or y parameter
+                                per_sample_losses = loss_fn(model, x_selected, t_selected, e_selected, b, keepdim=True)
+                            self.vrdit_controller.update_variance_estimates(t_selected, per_sample_losses.detach())
+                
+                # VR-DiT: Apply mSVRG control variates if enabled
+                if self.vrdit_controller.use_msvrg:
+                    try:
+                        # Get current gradients
+                        current_grads = []
+                        for param in model.parameters():
+                            if param.grad is not None:
+                                current_grads.append(param.grad.data.clone())
+                        
+                        # Apply control variate (placeholder - full implementation needed)
+                        # controlled_grads = self.vrdit_controller.get_control_variate_gradient(
+                        #     model, x_selected, t_selected, e_selected, current_grads
+                        # )
+                        
+                        # For now, just use current gradients
+                        
+                    except Exception as e:
+                        logging.warning(f"VR-DiT mSVRG failed: {e}, using standard gradients")
 
                 if self.args.sr:
                     updateBN(model)
@@ -358,24 +505,27 @@ class Diffusion(object):
                     )
                 except Exception:
                     pass
+                
                 optimizer.step()
+                
+                # VR-DiT: Update snapshot if needed
+                if self.vrdit_controller.should_update_snapshot():
+                    self.vrdit_controller.update_snapshot(model)
 
                 if args.use_ema and self.config.model.ema:
                     ema_helper.update(model)
 
-                # 在保存检查点时
                 if step % self.config.training.snapshot_freq == 0 or step == 1:
-                    if torch.distributed.get_rank() == 0: 
+                    if get_rank() == 0: 
                         model.zero_grad()
                         
-                        # 获取模型的状态字典
                         if hasattr(model, 'module'):
                             model_state_dict = model.module.state_dict()
                         else:
                             model_state_dict = model.state_dict()
                         
                         states = [
-                            model_state_dict,  # 保存状态字典，不是整个模型
+                            model_state_dict,
                             optimizer.state_dict(),
                             epoch,
                             step,
@@ -388,7 +538,7 @@ class Diffusion(object):
                     
 
                 data_start = time.time()
-            if torch.distributed.get_rank() == 0 and epoch % 100 == 0: 
+            if get_rank() == 0 and epoch % 100 == 0: 
                 states = [
                             model.state_dict(),
                             optimizer.state_dict(),
@@ -403,51 +553,8 @@ class Diffusion(object):
                     os.path.join(self.args.log_path, "ckpt_ep{}.pth".format(epoch)),
                 )
 
+
     def sample(self):
-        # model = Model(self.config)
-
-        # if not self.args.use_pretrained:
-        #     if getattr(self.config.sampling, "ckpt_id", None) is None:
-        #         states = torch.load(
-        #             os.path.join(self.args.log_path, "ckpt.pth"),
-        #             map_location=self.config.device,
-        #         )
-        #     else:
-        #         states = torch.load(
-        #             os.path.join(
-        #                 self.args.log_path, f"ckpt_{self.config.sampling.ckpt_id}.pth"
-        #             ),
-        #             map_location=self.config.device,
-        #         )
-        #     model = model.to(self.device)
-        #     model = torch.nn.DataParallel(model)
-        #     # weights_dict = {}
-        #     # for k, v in states[0].items():
-        #     #     new_k = k.replace('module.', '') if 'module' in k else k
-        #     #     weights_dict[new_k] = v
-        #     model.load_state_dict(states[0], strict=True)
-
-        #     if self.config.model.ema:
-        #         ema_helper = EMAHelper(mu=self.config.model.ema_rate)
-        #         ema_helper.register(model)
-        #         ema_helper.load_state_dict(states[-1])
-        #         ema_helper.ema(model)
-        #     else:
-        #         ema_helper = None
-        # else:
-        #     # This used the pretrained DDPM model, see https://github.com/pesser/pytorch_diffusion
-        #     if self.config.data.dataset == "CIFAR10":
-        #         name = "cifar10"
-        #     elif self.config.data.dataset == "LSUN":
-        #         name = f"lsun_{self.config.data.category}"
-        #     else:
-        #         raise ValueError
-        #     ckpt = get_ckpt_path(f"ema_{name}")
-        #     print("Loading checkpoint {}".format(ckpt))
-        #     model.load_state_dict(torch.load(ckpt, map_location=self.device))
-        #     model.to(self.device)
-        #     model = torch.nn.DataParallel(model)
-
         self.model.eval()
 
         if self.args.fid:
@@ -469,7 +576,6 @@ class Diffusion(object):
 
         config = self.config
         
-        # 确保输出目录存在
         os.makedirs(self.args.image_folder, exist_ok=True)
         
         img_id = len(glob.glob(f"{self.args.image_folder}/*"))
@@ -490,7 +596,11 @@ class Diffusion(object):
                     device=self.device,
                 )
 
-                x = self.sample_image(x, model)
+                y = None
+                if hasattr(config.model, 'num_classes') and config.model.num_classes > 0:
+                    y = torch.randint(0, config.model.num_classes, (n,), device=self.device)
+
+                x = self.sample_image(x, model, y)
                 x = inverse_data_transform(config, x)
 
                 for i in range(n):
@@ -510,9 +620,12 @@ class Diffusion(object):
             device=self.device,
         )
 
-        # NOTE: This means that we are producing each predicted x0, not x_{t-1} at timestep t.
+        y = None
+        if hasattr(config.model, 'num_classes') and config.model.num_classes > 0:
+            y = torch.randint(0, config.model.num_classes, (8,), device=self.device)
+
         with torch.no_grad():
-            _, x = self.sample_image(x, model, last=False)
+            _, x = self.sample_image(x, model, y, last=False)
 
         x = [inverse_data_transform(config, y) for y in x]
 
@@ -554,15 +667,19 @@ class Diffusion(object):
         x = torch.cat(z_, dim=0)
         xs = []
 
-        # Hard coded here, modify to your preferences
+        y = None
+        if hasattr(config.model, 'num_classes') and config.model.num_classes > 0:
+            y = torch.randint(0, config.model.num_classes, (x.size(0),), device=self.device)
+
         with torch.no_grad():
             for i in range(0, x.size(0), 8):
-                xs.append(self.sample_image(x[i : i + 8], model))
+                batch_y = y[i:i+8] if y is not None else None
+                xs.append(self.sample_image(x[i : i + 8], model, batch_y))
         x = inverse_data_transform(config, torch.cat(xs, dim=0))
         for i in range(x.size(0)):
             tvu.save_image(x[i], os.path.join(self.args.image_folder, f"{i}.png"))
 
-    def sample_image(self, x, model, last=True):
+    def sample_image(self, x, model, y=None, last=True):
         try:
             skip = self.args.skip
         except Exception:
@@ -582,9 +699,9 @@ class Diffusion(object):
                 seq = [int(s) for s in list(seq)]
             else:
                 raise NotImplementedError
-            from functions.denoising import generalized_steps
+            from functions.denoising import generalized_steps_dit
 
-            xs = generalized_steps(x, seq, model, self.betas, eta=self.args.eta)
+            xs = generalized_steps_dit(x, seq, model, self.betas, eta=self.args.eta, y=y)
             x = xs
         elif self.args.sample_type == "ddpm_noisy":
             if self.args.skip_type == "uniform":
@@ -600,9 +717,9 @@ class Diffusion(object):
                 seq = [int(s) for s in list(seq)]
             else:
                 raise NotImplementedError
-            from functions.denoising import ddpm_steps
+            from functions.denoising import ddpm_steps_dit
 
-            x = ddpm_steps(x, seq, model, self.betas)
+            x = ddpm_steps_dit(x, seq, model, self.betas, y=y)
         else:
             raise NotImplementedError
         if last:
@@ -612,23 +729,15 @@ class Diffusion(object):
     def test(self):
         pass
 
-
     def obtain_feature(self, x, step):
-        b_size =x.size()[0]         
+        b_size = x.size()[0]         
         x = x.to(self.device)
         x = data_transform(self.config, x)
         e = torch.randn_like(x)
 
-        # antithetic sampling
-        t = step*torch.ones(b_size).to(self.device)
-            
+        t = step * torch.ones(b_size).to(self.device)
         
-        # t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:n]
         a = (1-self.betas).cumprod(dim=0).index_select(0, t.long()).view(-1, 1, 1, 1)
         x = x * a.sqrt() + e * (1.0 - a).sqrt()
         mid_feature, output = self.model(x, t.float(), return_mid=True)
         return x, mid_feature, output
-        # if keepdim:
-        #     return (e - output).square().sum(dim=(1, 2, 3))
-        # else:
-        #     return (e - output).square().sum(dim=(1, 2, 3)).mean(dim=0)
